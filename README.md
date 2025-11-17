@@ -22,12 +22,12 @@
 ## Technical Stack
 
 **Models**
-- **ResNet50**: Custom-trained on Roboflow for court geometry (25.6M params, 97.5MB)
-- **YOLO**: Ultralytics pre-trained for player/ball detection (12ms/frame)
+- **ResNet50**: Custom trained on public dataset from google drive for court geometry
+- **YOLOV12**: Ultralytics pre-trained for player detection
+- **YOLOV5**: Custom-trained on Roboflow for ball detection
+
 
 **Libraries**: PyTorch, OpenCV, Pandas, NumPy, Ultralytics
-
-**Performance**: 43 FPS processing (1.7× real-time on 25 FPS video)
 
 **Model Training**: ResNet50 trained on Roboflow | YOLO from Ultralytics COCO
 
