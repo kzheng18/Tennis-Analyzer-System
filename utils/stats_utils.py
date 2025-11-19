@@ -4,8 +4,8 @@ import cv2
 def detect_shot_type(ball_detections, start_frame, end_frame, video_fps=50):
     """    
     SLICE:    Slow OR loses speed during flight (backspin drag)
-    FLAT:     Medium arc, maintains speed (minimal spin)
-    TOPSPIN:  High arc or medium arc + sharp drop (heavy forward spin)
+    FLAT:     Low arc, shallow descent, minimal decay
+    TOPSPIN:  High arc, early apex, sharp drop (heavy forward spin)
     """
     
     if start_frame >= len(ball_detections) or end_frame >= len(ball_detections):
@@ -26,79 +26,105 @@ def detect_shot_type(ball_detections, start_frame, end_frame, video_fps=50):
     if len(positions) < 8:
         return None
     
-    # Extract Y positions
+    # Extract positions
     y_positions = [p['y'] for p in positions]
     x_positions = [p['x'] for p in positions]
     
     min_y = min(y_positions)
     max_y = max(y_positions)
     
-    # arc height
+    # Arc height
     arc_height = max_y - min_y
     
-    # peak position
+    # Peak position (normalized index of apex)
     peak_idx = y_positions.index(min_y)
-    peak_position = peak_idx / len(y_positions)
+    peak_position = peak_idx / len(y_positions)  # 0 = very early, 1 = very late
     
-    # descent rate
+    # Descent rate (in second half of trajectory)
     second_half = y_positions[len(y_positions)//2:]
     if len(second_half) > 1:
         descent_rate = (max(second_half) - min(second_half)) / len(second_half)
     else:
-        descent_rate = 0
+        descent_rate = 0.0
     
-    # Calculate speeds
+    # Compute approximate speeds in first vs. second half
     mid_point = len(positions) // 2
     
     first_half = positions[:mid_point]
     if len(first_half) >= 2:
         dx1 = first_half[-1]['x'] - first_half[0]['x']
         dy1 = first_half[-1]['y'] - first_half[0]['y']
-        dist1 = (dx1**2 + dy1**2)**0.5
+        dist1 = (dx1**2 + dy1**2) ** 0.5
         frames1 = first_half[-1]['frame'] - first_half[0]['frame']
         speed_first = dist1 / max(frames1, 1)
     else:
-        speed_first = 0
+        speed_first = 0.0
     
     second_half_pos = positions[mid_point:]
     if len(second_half_pos) >= 2:
         dx2 = second_half_pos[-1]['x'] - second_half_pos[0]['x']
         dy2 = second_half_pos[-1]['y'] - second_half_pos[0]['y']
-        dist2 = (dx2**2 + dy2**2)**0.5
+        dist2 = (dx2**2 + dy2**2) ** 0.5
         frames2 = second_half_pos[-1]['frame'] - second_half_pos[0]['frame']
         speed_second = dist2 / max(frames2, 1)
     else:
-        speed_second = 0
+        speed_second = 0.0
     
     if speed_first > 0:
         speed_decay_percent = ((speed_first - speed_second) / speed_first) * 100
     else:
-        speed_decay_percent = 0
+        speed_decay_percent = 0.0
     
-    print(f"      [Arc={arc_height:.0f}px, Descent={descent_rate:.1f}px/f, Decay={speed_decay_percent:.1f}%]")
-    
-    # ═══════════════════════════════════════════════
-    # Shot Classifications
-    # Need Fine Tuning
-    # ═══════════════════════════════════════════════
-    if arc_height >= 300 and descent_rate >= 18:
-        print(f"      → TOPSPIN (extreme)\n")
-        return "Topspin"
-    
-    if arc_height >= 280 and peak_position <= 0.35 and descent_rate >= 16:
-        print(f"      → TOPSPIN (extreme early peak)\n")
-        return "Topspin"
-    
-    if speed_decay_percent >= 70:  
-        print(f"      → SLICE (extreme decay)\n")
+        # Average speed across the whole trajectory
+    if len(positions) >= 2:
+        dx_total = positions[-1]['x'] - positions[0]['x']
+        dy_total = positions[-1]['y'] - positions[0]['y']
+        dist_total = (dx_total**2 + dy_total**2) ** 0.5
+        frames_total = positions[-1]['frame'] - positions[0]['frame']
+        avg_speed = dist_total / max(frames_total, 1)
+    else:
+        avg_speed = 0.0
+
+    print(
+        f"      [Arc={arc_height:.0f}px, "
+        f"PeakPos={peak_position:.2f}, "
+        f"Descent={descent_rate:.1f}px/f, "
+        f"Decay={speed_decay_percent:.1f}%, "
+        f"AvgSpd={avg_speed:.2f}px/f]"
+    )
+
+    # ─────────────────────────────────────────────
+    # Shot classification
+    # Topspin: high arc (≥ 250px), early apex, steep descent (≥ 15px/frame)
+    # Slice:   SLOW + high decay (≥ 55%) OR low arc with late apex
+    # Flat:    low arc, shallow descent, minimal decay
+    # Default: Topspin
+    # ─────────────────────────────────────────────
+
+    # Choose a “slow” threshold in pixels/frame (you can tune this)
+    SLOW_SPEED = 5.0
+
+    # 1) SLICE: slow + strong backspin effect
+    if (avg_speed <= SLOW_SPEED and speed_decay_percent >= 40) or \
+       (arc_height < 60 and peak_position > 0.6 and avg_speed <= SLOW_SPEED):
+        print("      → SLICE\n")
         return "Slice"
-    
-    if arc_height < 50 and peak_position > 0.75 and descent_rate < 3:
-        print(f"      → SLICE (extreme floater)\n")
-        return "Slice"
-    
-    print(f"      → FLAT\n")
-    return "Flat"
+
+    # 2) FLAT: low arc, shallow descent, minimal decay
+    if arc_height < 120 and descent_rate < 8 and speed_decay_percent < 25:
+        print("      → FLAT\n")
+        return "Flat"
+
+    # 3) TOPSPIN: high arc, early peak, steep drop
+    if arc_height >= 250 and peak_position <= 0.5 and descent_rate >= 15:
+        print("      → TOPSPIN\n")
+        return "Topspin"
+
+    # 4) Default → TOPSPIN (most shots)
+    print("      → TOPSPIN (default)\n")
+    return "Topspin"
+
+
 
 
 def draw_stats(output_video_frames, player_stats, ball_detections=None, ball_shot_frames=None, video_fps=50):
