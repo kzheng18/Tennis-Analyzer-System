@@ -62,11 +62,6 @@ class PlayerTracker:
         return player_dict
     
     def choose_players(self, court_keypoints, player_dict):
-        """
-        Choose 2 players closest to the court keypoints.
-        Strategy: Find players on opposite ends (top/bottom) closest to court.
-        Filters out officials/ball kids who are far from court or at edges.
-        """
         if len(player_dict) < 2:
             return list(player_dict.keys())
         
@@ -93,7 +88,7 @@ class PlayerTracker:
             })
         
         # This removes umpire, spectators, and people on sidelines
-        candidates = [c for c in candidates if c['distance'] < 350]
+        candidates = [c for c in candidates if c['distance'] < 450]
         
         if len(candidates) < 2:
             print(f"WARNING: Only {len(candidates)} players close enough to court")
@@ -139,9 +134,6 @@ class PlayerTracker:
         return chosen_players
     
     def choose_and_filter_players(self, court_keypoints, player_detections):
-        """
-        smart remapping filtering: takes < 10 people and filter the ones on court only
-        """
         chosen_ids = []
         reference_frame_idx = None
         
@@ -175,80 +167,65 @@ class PlayerTracker:
                     'frames_missing': 0
                 }
         
-        # Determine player roles
+        # Determine roles (top/bottom)
         player_roles = {}
         if len(chosen_ids) >= 2:
-            ids = list(chosen_ids)
-            y0 = last_positions[ids[0]]['center'][1]
-            y1 = last_positions[ids[1]]['center'][1]
-            
-            if y0 < y1:
-                player_roles[ids[0]] = 'top'
-                player_roles[ids[1]] = 'bottom'
-                print(f"  Player {ids[0]} = TOP (y={y0:.0f})")
-                print(f"  Player {ids[1]} = BOTTOM (y={y1:.0f})")
-            else:
-                player_roles[ids[0]] = 'bottom'
-                player_roles[ids[1]] = 'top'
-                print(f"  Player {ids[0]} = BOTTOM (y={y0:.0f})")
-                print(f"  Player {ids[1]} = TOP (y={y1:.0f})")
+            y_positions = {pid: last_positions[pid]['center'][1] for pid in chosen_ids if pid in last_positions}
+            sorted_by_y = sorted(y_positions.items(), key=lambda x: x[1])
+            player_roles[sorted_by_y[0][0]] = 'top'
+            player_roles[sorted_by_y[1][0]] = 'bottom'
+            print(f"  Player roles: {player_roles}")
         
-        # Filter with smart remapping
         filtered = []
         
         for frame_idx, det in enumerate(player_detections):
             mapped_frame = {}
             
-            # Add detections with known mapped IDs
+            # Update tracking for present players
             for yolo_id, bbox in det.items():
                 if yolo_id in id_mapping:
-                    tracked_id = id_mapping[yolo_id]
-                    mapped_frame[tracked_id] = bbox
+                    player_id = id_mapping[yolo_id]
+                    mapped_frame[player_id] = bbox
                     
                     # Update last known position
-                    # BUT: Only if player is fully visible (not cut off at edges)
                     center = get_center_bbox(bbox)
                     area = (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
-                    
-                    # Check if player is too close to frame edges (might be cut off)
-                    # Don't use this position for future matching if near edges
-                    is_near_edge = (center[0] < 100 or center[0] > 1820 or  # Left/right edges
-                                   center[1] < 100 or center[1] > 980)      # Top/bottom edges
-                    
-                    if not is_near_edge:
-                        # Good position - player fully visible
-                        last_positions[tracked_id] = {
-                            'center': center,
-                            'area': area,
-                            'bbox': bbox,
-                            'frames_missing': 0
-                        }
-                    else:
-                        # Near edge - just reset missing counter but keep old position for matching
-                        last_positions[tracked_id]['frames_missing'] = 0
+                    last_positions[player_id] = {
+                        'center': center,
+                        'area': area,
+                        'bbox': bbox,
+                        'frames_missing': 0
+                    }
             
-            # Update missing counters
-            for tracked_id in chosen_ids:
-                if tracked_id not in mapped_frame:
-                    last_positions[tracked_id]['frames_missing'] += 1
+            # Increment missing counters
+            for pid in chosen_ids:
+                if pid not in mapped_frame:
+                    if pid in last_positions:
+                        last_positions[pid]['frames_missing'] += 1
             
-            # Smart remapping: Only if player missing for 10+ frames
-            missing_ids = set(chosen_ids) - set(mapped_frame.keys())
-            
-            if missing_ids and det:
-                unmapped_ids = [yid for yid in det.keys() if yid not in id_mapping]
+            # Try to remap missing players
+            if len(mapped_frame) < 2:
+                # Find unmapped IDs
+                unmapped_ids = [yolo_id for yolo_id in det.keys() if yolo_id not in id_mapping.values()]
                 
-                for missing_id in missing_ids:
-                    frames_missing = last_positions[missing_id]['frames_missing']
-                    
-                    # Only try remapping if missing for 10-100 frames
-                    if frames_missing < 10 or frames_missing > 100:
-                        if frames_missing == 10 or frames_missing == 101:
-                            print(f"  Player {missing_id} ({player_roles.get(missing_id)}): missing {frames_missing}f - {'waiting' if frames_missing == 10 else 'gave up'}")
+                for missing_id in chosen_ids:
+                    if missing_id in mapped_frame or missing_id not in last_positions:
                         continue
                     
-                    # Only check every 5 frames to reduce overhead
-                    if frames_missing % 5 != 0:
+                    frames_missing = last_positions[missing_id]['frames_missing']
+                    
+                    if frames_missing > 30:
+                        if frames_missing == 31:
+                            print(f"  Player {missing_id} ({player_roles.get(missing_id)}): missing {frames_missing}f - gave up")
+                        continue
+                    
+                    if frames_missing < 5:
+                        if frames_missing == 3:
+                            print(f"  Player {missing_id} ({player_roles.get(missing_id)}): missing {frames_missing}f - waiting")
+                        continue
+                    
+                    # Only check every 3 frames to reduce overhead (was 5)
+                    if frames_missing % 3 != 0:
                         continue
                     
                     last_pos = last_positions[missing_id]
@@ -268,13 +245,11 @@ class PlayerTracker:
                         center = get_center_bbox(bbox)
                         area = (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
                         
-                        # HARD CONSTRAINT 1: Size must be very similar
                         area_ratio = area / last_pos['area'] if last_pos['area'] > 0 else 1.0
-                        if area_ratio < 0.7 or area_ratio > 1.4:
-                            rejection_log.append(f"   ✗ ID {yolo_id}: area ratio {area_ratio:.2f} (need 0.7-1.4)")
+                        if area_ratio < 0.5 or area_ratio > 2.0:
+                            rejection_log.append(f"   ✗ ID {yolo_id}: area ratio {area_ratio:.2f} (need 0.5-2.0)")
                             continue
                         
-                        # HARD CONSTRAINT 2: Must be on court
                         min_court_dist = float('inf')
                         for i in range(0, len(court_keypoints), 2):
                             court_pt = (court_keypoints[i], court_keypoints[i+1])
@@ -282,32 +257,36 @@ class PlayerTracker:
                             if d < min_court_dist:
                                 min_court_dist = d
                         
-                        if min_court_dist > 350:
-                            rejection_log.append(f"   ✗ ID {yolo_id}: court dist {min_court_dist:.0f} (need <350)")
+                        if min_court_dist > 500:
+                            rejection_log.append(f"   ✗ ID {yolo_id}: court dist {min_court_dist:.0f} (need <500)")
                             continue
                         
-                        # HARD CONSTRAINT 3: Must be in correct half
                         if len(last_positions) >= 2:
                             other_players_y = [p['center'][1] for tid, p in last_positions.items() 
                                              if tid != missing_id and p['frames_missing'] == 0]
                             
                             if other_players_y:
+                                # Use wider boundary with margin
                                 y_boundary = (min(other_players_y + [last_pos['center'][1]]) + 
                                             max(other_players_y + [last_pos['center'][1]])) / 2.0
                                 
                                 expected_top = (player_roles.get(missing_id) == 'top')
                                 current_top = (center[1] < y_boundary)
                                 
-                                if expected_top != current_top:
-                                    rejection_log.append(f"   ✗ ID {yolo_id}: wrong half (y={center[1]:.0f}, boundary={y_boundary:.0f}, expected {'top' if expected_top else 'bottom'})")
+                                margin = 100
+                                crosses_boundary = (expected_top and center[1] < y_boundary + margin) or \
+                                                 (not expected_top and center[1] > y_boundary - margin)
+                                
+                                if not crosses_boundary:
+                                    rejection_log.append(f"   ✗ ID {yolo_id}: wrong half (y={center[1]:.0f}, boundary={y_boundary:.0f}±{margin}, expected {'top' if expected_top else 'bottom'})")
                                     continue
                         
                         # Calculate match score
                         area_diff = abs(1.0 - area_ratio)
                         distance = measure_distance(last_pos['center'], center)
                         
-                        # Score heavily favors size match
-                        score = (area_diff * 1000) + (distance * 0.3) + (min_court_dist * 0.1)
+                        # Score heavily favors size match and proximity
+                        score = (area_diff * 500) + (distance * 0.5) + (min_court_dist * 0.2)
                         
                         print(f"   ✓ ID {yolo_id}: CANDIDATE - area={area:.0f} (ratio {area_ratio:.2f}), center={center}, court_dist={min_court_dist:.0f}, score={score:.0f}")
                         
@@ -321,8 +300,7 @@ class PlayerTracker:
                         for log in rejection_log[:10]: 
                             print(log)
                     
-                    # Thresholds
-                    if best_candidate is not None and best_score < 250:
+                    if best_candidate is not None and best_score < 400:
                         print(f"   ✅ REMAPPING: ID {best_candidate} → Player {missing_id} (score {best_score:.0f})")
                         
                         id_mapping[best_candidate] = missing_id
@@ -336,7 +314,7 @@ class PlayerTracker:
                             'frames_missing': 0
                         }
                     elif best_candidate is not None:
-                        print(f"   ⚠️  Best candidate ID {best_candidate} score {best_score:.0f} > threshold 250 (rejected)")
+                        print(f"   ⚠️  Best candidate ID {best_candidate} score {best_score:.0f} > threshold 400 (rejected)")
             
             filtered.append(mapped_frame)
         
@@ -345,7 +323,7 @@ class PlayerTracker:
         none = sum(1 for d in filtered if len(d) == 0)
         
         print(f"✓ Tracking: {both} frames with both, {one} with one, {none} with none")
-        print(f"  (Short gaps <10f will be filled by interpolation)")
+        print(f"  (Short gaps will be filled by interpolation)")
         
         return filtered
     
@@ -376,14 +354,14 @@ class PlayerTracker:
             # Count original detections
             orig_valid = df['x1'].notna().sum()
             
-            # Interpolate linearly
-            df = df.interpolate(method='linear', limit_direction='both', limit=60)
+            # ✅ FIX 8: More aggressive interpolation (limit=100 instead of 60)
+            df = df.interpolate(method='linear', limit_direction='both', limit=100)
             
             # Forward fill for any remaining NaNs at start
-            df = df.ffill(limit=30)
+            df = df.ffill(limit=50)
             
             # Backward fill for any remaining NaNs at end
-            df = df.bfill(limit=30)
+            df = df.bfill(limit=50)
             
             # Count after interpolation
             interp_valid = df['x1'].notna().sum()
