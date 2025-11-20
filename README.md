@@ -51,7 +51,3 @@
 ### 5. Shot Type Classification
 **Issue**: Too many/few Topspin or Slice detections  
 **Solution**: Adjust trajectory analysis thresholds
-
-
-## Slide Show
-[AI-driven Tennis Analytics From a Single Camera Perspective](https://docs.google.com/presentation/d/1fhx5SRMFeWyEuho4I2ZenzR7ZMevnlG8E6GQp0nxsMY/edit?usp=sharing)
